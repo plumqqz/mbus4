@@ -2,18 +2,19 @@
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 9.1beta2
+-- Dumped from database version 9.0.4
 -- Dumped by pg_dump version 9.1beta2
--- Started on 2011-07-05 13:13:54
+-- Started on 2011-10-11 15:00:54
 
 SET statement_timeout = 0;
 SET client_encoding = 'UTF8';
-SET standard_conforming_strings = on;
+SET standard_conforming_strings = off;
 SET check_function_bodies = false;
 SET client_min_messages = warning;
+SET escape_string_warning = off;
 
 --
--- TOC entry 7 (class 2615 OID 16639)
+-- TOC entry 8 (class 2615 OID 76767)
 -- Name: mbus4; Type: SCHEMA; Schema: -; Owner: postgres
 --
 
@@ -24,28 +25,13 @@ ALTER SCHEMA mbus4 OWNER TO postgres;
 
 SET search_path = mbus4, pg_catalog;
 
---
--- TOC entry 21 (class 1255 OID 16642)
--- Dependencies: 7
--- Name: clear_tempq(); Type: FUNCTION; Schema: mbus4; Owner: postgres
---
-
-CREATE FUNCTION clear_tempq() RETURNS void
-    LANGUAGE sql
-    AS $$
- delete from mbus4.tempq where not exists (select * from pg_stat_activity where (headers->'tempq') like 'temp.' || md5(procpid::text || backend_start::text) || '%');
-$$;
-
-
-ALTER FUNCTION mbus4.clear_tempq() OWNER TO postgres;
-
 SET default_tablespace = '';
 
 SET default_with_oids = false;
 
 --
--- TOC entry 1823 (class 1259 OID 16643)
--- Dependencies: 7 343 343 343
+-- TOC entry 2716 (class 1259 OID 76769)
+-- Dependencies: 8 1170 1170 1170
 -- Name: qt_model; Type: TABLE; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -65,8 +51,89 @@ CREATE TABLE qt_model (
 ALTER TABLE mbus4.qt_model OWNER TO postgres;
 
 --
--- TOC entry 22 (class 1255 OID 16649)
--- Dependencies: 347 7 378
+-- TOC entry 852 (class 1255 OID 79613)
+-- Dependencies: 1230 8 1174
+-- Name: build_users_record_consumer_list(qt_model); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION build_users_record_consumer_list(qr qt_model) RETURNS integer[]
+    LANGUAGE plpgsql
+    AS $$
+       begin
+         return array( 
+         with t as (select qr.*)
+          select 207 from t where 
+           ( (1=1) and t.added > '2011-09-26 16:45:41.996333'::timestamp without time zone) );
+       end;
+      $$;
+
+
+ALTER FUNCTION mbus4.build_users_record_consumer_list(qr qt_model) OWNER TO postgres;
+
+--
+-- TOC entry 830 (class 1255 OID 79605)
+-- Dependencies: 8 1230
+-- Name: clear_queue_users(); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION clear_queue_users() RETURNS void
+    LANGUAGE plpgsql
+    AS $_$
+declare
+ qry text;
+begin
+ select string_agg( 'select id from mbus4.consumer where id=' || id::text ||' and ( (' || r.selector || ')' || (case when r.added is null then ')' else $$ and q.added > '$$ || (r.added::text) || $$'::timestamp without time zone)$$ end) ||chr(10), ' union all '||chr(10))
+  into qry
+  from mbus4.consumer r where qname='users';
+ execute 'delete from mbus4.qt$users q where expires < now() or (received @> array(' || qry || '))';
+end; 
+$_$;
+
+
+ALTER FUNCTION mbus4.clear_queue_users() OWNER TO postgres;
+
+--
+-- TOC entry 807 (class 1255 OID 76768)
+-- Dependencies: 8
+-- Name: clear_tempq(); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION clear_tempq() RETURNS void
+    LANGUAGE sql
+    AS $$
+ delete from mbus4.tempq where not exists (select * from pg_stat_activity where (headers->'tempq') like 'temp.' || md5(procpid::text || backend_start::text) || '%');
+$$;
+
+
+ALTER FUNCTION mbus4.clear_tempq() OWNER TO postgres;
+
+--
+-- TOC entry 851 (class 1255 OID 79612)
+-- Dependencies: 1230 8 1174
+-- Name: consume(text, text); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION consume(qname text, cname text DEFAULT 'default'::text) RETURNS SETOF qt_model
+    LANGUAGE plpgsql
+    AS $_$
+        begin
+          if qname like 'temp.%' then
+            return query select * from mbus4.consume_temp(qname);
+            return;
+          end if;
+         case lower(qname)
+         when 'users' then case lower(cname)  when 'default' then return query select * from mbus4.consume_users_by_default(); return; else raise exception $$unknown consumer:%$$, consumer; end case;
+
+         end case;
+        end;
+        $_$;
+
+
+ALTER FUNCTION mbus4.consume(qname text, cname text) OWNER TO postgres;
+
+--
+-- TOC entry 808 (class 1255 OID 76775)
+-- Dependencies: 8 1174 1230
 -- Name: consume_temp(text); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -89,8 +156,155 @@ $$;
 ALTER FUNCTION mbus4.consume_temp(tqname text) OWNER TO postgres;
 
 --
--- TOC entry 29 (class 1255 OID 16650)
--- Dependencies: 378 7
+-- TOC entry 832 (class 1255 OID 79607)
+-- Dependencies: 1174 1230 8
+-- Name: consume_users_by_default(); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION consume_users_by_default() RETURNS SETOF qt_model
+    LANGUAGE plpgsql
+    AS $_$
+declare
+ rv mbus4.qt_model;
+ c_id int;
+ pn int;
+ cnt int;
+ r record;
+ gotrecord boolean:=false;
+begin
+ set local enable_seqscan=off;
+
+  if version() like 'PostgreSQL 9.0%' then
+     for r in 
+      select * 
+        from mbus4.qt$users t
+       where 207<>all(received) and t.delayed_until<now() and (1=1)=true and added >'2011-09-26 16:45:41.996333' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp 
+       order by added, delayed_until
+       limit 64
+      loop
+        begin
+          select * into rv from mbus4.qt$users t where t.iid=r.iid and 207<>all(received) for update nowait;
+          continue when not found;
+          gotrecord:=true;
+          exit;
+        exception
+         when lock_not_available then null;
+        end;
+      end loop;
+  else
+     for r in 
+      select * 
+        from mbus4.qt$users t
+       where 207<>all(received) and t.delayed_until<now() and (1=1)=true and added > '2011-09-26 16:45:41.996333' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp 
+       order by added, delayed_until
+       limit 64
+      loop
+        if pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$users.' || r.iid))::bit(64)::bigint ) then
+          select * into rv from mbus4.qt$users t where t.iid=r.iid and 207<>all(received) for update;
+          continue when not found;
+          gotrecord:=true;
+          exit;
+        end if;
+      end loop;
+  end if;
+
+
+ if gotrecord then 
+    if mbus4.build_users_record_consumer_list(rv) <@ (rv.received || 207) then
+      delete from mbus4.qt$users where iid = rv.iid;
+    else
+      update mbus4.qt$users t set received=received || 207 where t.iid=rv.iid;
+    end if;
+    rv.headers = rv.headers || hstore('destination','users');
+    return next rv;
+    return;
+ end if; 
+end;
+$_$;
+
+
+ALTER FUNCTION mbus4.consume_users_by_default() OWNER TO postgres;
+
+--
+-- TOC entry 848 (class 1255 OID 79608)
+-- Dependencies: 8 1230 1174
+-- Name: consumen_users_by_default(integer); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION consumen_users_by_default(amt integer) RETURNS SETOF qt_model
+    LANGUAGE plpgsql
+    AS $_$
+declare
+ rv mbus4.qt_model;
+ rvarr mbus4.qt_model[];
+ c_id int;
+ pn int;
+ cnt int;
+ r record;
+ inloop boolean;
+ trycnt integer:=0;
+begin
+ set local enable_seqscan=off;
+
+ rvarr:=array[]::mbus4.qt_model[];
+ <<mainloop>>
+ while coalesce(array_length(rvarr,1),0)<amt loop
+  
+   inloop:=false;
+   for r in select * 
+              from mbus4.qt$users t
+             where 207<>all(received) 
+              and t.delayed_until<now() 
+              and (1=1)=true 
+              and added > '2011-09-26 16:45:41.996333' 
+              and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp 
+              and t.iid not in (select a.iid from unnest(rvarr) as a)
+              order by added, delayed_until
+            limit amt
+   loop
+      inloop:=true;
+      if version() like 'PostgreSQL 9.0%' then
+        begin
+          select * into rv from mbus4.qt$users t where t.iid=r.iid and 207<>all(received) for update nowait;
+          continue when not found;
+          rvarr:=rvarr||rv;
+         exception
+          when lock_not_available then null;
+        end;
+      else
+        if pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$users.' || r.iid))::bit(64)::bigint ) then
+         select * into rv from mbus4.qt$users t where t.iid=r.iid and 207<>all(received) for update nowait;
+         continue when not found;
+         rvarr:=rvarr||rv;
+        else
+         exit mainloop when trycnt=64;
+         trycnt:=trycnt+1;
+        end if;
+      end if;
+   end loop;
+   exit when not inloop;
+ end loop; 
+
+ if array_length(rvarr,1)>0 then 
+   for rv in select * from unnest(rvarr) loop
+    if mbus4.build_users_record_consumer_list(rv) <@ (rv.received || 207) then
+      delete from mbus4.qt$users where iid = rv.iid;
+    else
+      update mbus4.qt$users t set received=received || 207 where t.iid=rv.iid;
+    end if;
+   end loop; 
+   return query select id, added, iid, delayed_until, expires, received, headers || hstore('destination','users') as headers, properties, data from unnest(rvarr);
+   return;
+ end if; 
+end;
+$_$;
+
+
+ALTER FUNCTION mbus4.consumen_users_by_default(amt integer) OWNER TO postgres;
+
+--
+-- TOC entry 809 (class 1255 OID 76776)
+-- Dependencies: 1230 8
 -- Name: create_consumer(text, text, text, boolean); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -141,18 +355,24 @@ begin
         end;
       end loop;
   else
+     for r in 
       select * 
-        into rv
         from mbus4.qt$<!qname!> t
        where <!consumer_id!><>all(received) and t.delayed_until<now() and (<!selector!>)=true and added > '<!now!>' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp 
-         and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || t.iid))::bit(64)::bigint )
        order by added, delayed_until
        limit <!consumers!>
-         for update;
+      loop
+        if pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || r.iid))::bit(64)::bigint ) then
+          select * into rv from mbus4.qt$<!qname!> t where t.iid=r.iid and <!consumer_id!><>all(received) for update;
+          continue when not found;
+          gotrecord:=true;
+          exit;
+        end if;
+      end loop;
   end if;
 
 
- if rv.iid is not null then 
+ if gotrecord then 
     if mbus4.build_<!qname!>_record_consumer_list(rv) <@ (rv.received || <!c_id!>) then
       delete from mbus4.qt$<!qname!> where iid = rv.iid;
     else
@@ -194,46 +414,43 @@ begin
  set local enable_seqscan=off;
 
  rvarr:=array[]::mbus4.qt_model[];
- if version() like 'PostgreSQL 9.0%' then  
-   while coalesce(array_length(rvarr,1),0)<amt loop
-       inloop:=false;
-       for r in select * 
-                  from mbus4.qt$<!qname!> t
-                 where <!c_id!><>all(received) 
-                   and t.delayed_until<now() 
-                   and (<!selector!>)=true 
-                   and added > '<!now!>' 
-                   and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp 
-                   and t.iid not in (select a.iid from unnest(rvarr) as a)
-                 order by added, delayed_until
-                 limit amt
-       loop
-          inloop:=true;
-          begin
-              select * into rv from mbus4.qt$<!qname!> t where t.iid=r.iid and <!c_id!><>all(received) for update nowait;
-              continue when not found;
-              rvarr:=rvarr||rv;
-          exception
-              when lock_not_available then null;
-          end;
-       end loop; 
-       exit when not inloop;
-    end loop;
-  else
-    rvarr:=array(select row(t.* )::mbus4.qt_model
-                   from mbus4.qt$<!qname!> t
-                  where <!c_id!><>all(received) 
-                    and t.delayed_until<now() 
-                    and (<!selector!>)=true 
-                    and added > '<!now!>' 
-                    and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp 
-                    and t.iid not in (select a.iid from unnest(rvarr) as a)
-                    and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || t.iid))::bit(64)::bigint )
-                  order by added, delayed_until
-                  limit amt
-                    for update
-                );
-  end if;
+ <<mainloop>>
+ while coalesce(array_length(rvarr,1),0)<amt loop
+  
+   inloop:=false;
+   for r in select * 
+              from mbus4.qt$<!qname!> t
+             where <!c_id!><>all(received) 
+              and t.delayed_until<now() 
+              and (<!selector!>)=true 
+              and added > '<!now!>' 
+              and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp 
+              and t.iid not in (select a.iid from unnest(rvarr) as a)
+              order by added, delayed_until
+            limit amt
+   loop
+      inloop:=true;
+      if version() like 'PostgreSQL 9.0%' then
+        begin
+          select * into rv from mbus4.qt$<!qname!> t where t.iid=r.iid and <!c_id!><>all(received) for update nowait;
+          continue when not found;
+          rvarr:=rvarr||rv;
+         exception
+          when lock_not_available then null;
+        end;
+      else
+        if pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || r.iid))::bit(64)::bigint ) then
+         select * into rv from mbus4.qt$<!qname!> t where t.iid=r.iid and <!c_id!><>all(received) for update nowait;
+         continue when not found;
+         rvarr:=rvarr||rv;
+        else
+         exit mainloop when trycnt=<!consumers!>;
+         trycnt:=trycnt+1;
+        end if;
+      end if;
+   end loop;
+   exit when not inloop;
+ end loop; 
 
  if array_length(rvarr,1)>0 then 
    for rv in select * from unnest(rvarr) loop
@@ -298,8 +515,8 @@ $_$;
 ALTER FUNCTION mbus4.create_consumer(cname text, qname text, p_selector text, noindex boolean) OWNER TO postgres;
 
 --
--- TOC entry 32 (class 1255 OID 16652)
--- Dependencies: 378 7
+-- TOC entry 810 (class 1255 OID 76778)
+-- Dependencies: 1230 8
 -- Name: create_queue(text, integer); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -389,8 +606,8 @@ $_$;
 ALTER FUNCTION mbus4.create_queue(qname text, consumers_cnt integer) OWNER TO postgres;
 
 --
--- TOC entry 23 (class 1255 OID 16653)
--- Dependencies: 7
+-- TOC entry 811 (class 1255 OID 76779)
+-- Dependencies: 8
 -- Name: create_temporary_queue(); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -404,8 +621,8 @@ $$;
 ALTER FUNCTION mbus4.create_temporary_queue() OWNER TO postgres;
 
 --
--- TOC entry 31 (class 1255 OID 17073)
--- Dependencies: 7 378
+-- TOC entry 812 (class 1255 OID 76780)
+-- Dependencies: 1230 8
 -- Name: create_trigger(text, text, text); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -471,8 +688,8 @@ $_$;
 ALTER FUNCTION mbus4.create_trigger(src text, dst text, selector text) OWNER TO postgres;
 
 --
--- TOC entry 25 (class 1255 OID 16654)
--- Dependencies: 378 7
+-- TOC entry 813 (class 1255 OID 76781)
+-- Dependencies: 1230 8
 -- Name: drop_consumer(text, text); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -493,8 +710,8 @@ $_$;
 ALTER FUNCTION mbus4.drop_consumer(cname text, qname text) OWNER TO postgres;
 
 --
--- TOC entry 26 (class 1255 OID 16655)
--- Dependencies: 7 378
+-- TOC entry 814 (class 1255 OID 76782)
+-- Dependencies: 1230 8
 -- Name: drop_queue(text); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -549,8 +766,8 @@ $_X$;
 ALTER FUNCTION mbus4.drop_queue(qname text) OWNER TO postgres;
 
 --
--- TOC entry 30 (class 1255 OID 17083)
--- Dependencies: 7 378
+-- TOC entry 815 (class 1255 OID 76783)
+-- Dependencies: 1230 8
 -- Name: drop_trigger(text, text); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -573,8 +790,51 @@ $$;
 ALTER FUNCTION mbus4.drop_trigger(src text, dst text) OWNER TO postgres;
 
 --
--- TOC entry 27 (class 1255 OID 16656)
--- Dependencies: 343 343 7 343
+-- TOC entry 828 (class 1255 OID 79606)
+-- Dependencies: 8
+-- Name: peek_users(text); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION peek_users(msgid text DEFAULT NULL::text) RETURNS boolean
+    LANGUAGE sql
+    AS $_$
+   select case 
+              when $1 is null then exists(select * from mbus4.qt$users)
+              else exists(select * from mbus4.qt$users where iid=$1)
+           end;
+  $_$;
+
+
+ALTER FUNCTION mbus4.peek_users(msgid text) OWNER TO postgres;
+
+--
+-- TOC entry 850 (class 1255 OID 79611)
+-- Dependencies: 1170 8 1230 1170 1170
+-- Name: post(text, hstore, hstore, hstore, timestamp without time zone, timestamp without time zone); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION post(qname text, data hstore, headers hstore DEFAULT NULL::hstore, properties hstore DEFAULT NULL::hstore, delayed_until timestamp without time zone DEFAULT NULL::timestamp without time zone, expires timestamp without time zone DEFAULT NULL::timestamp without time zone) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+         begin
+          if qname like 'temp.%' then
+            perform mbus4.post_temp(qname, data, headers, properties, delayed_until, expires);
+            return;
+          end if;
+          case lower(qname)  when 'users' then perform mbus4.post_users(data, headers, properties, delayed_until, expires);
+
+          else
+           raise exception 'Unknown queue:%', qname;
+         end case;
+         end;
+        $$;
+
+
+ALTER FUNCTION mbus4.post(qname text, data hstore, headers hstore, properties hstore, delayed_until timestamp without time zone, expires timestamp without time zone) OWNER TO postgres;
+
+--
+-- TOC entry 816 (class 1255 OID 76784)
+-- Dependencies: 1170 1170 1170 8
 -- Name: post_temp(text, hstore, hstore, hstore, timestamp without time zone, timestamp without time zone); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -609,8 +869,44 @@ $_$;
 ALTER FUNCTION mbus4.post_temp(tqname text, data hstore, headers hstore, properties hstore, delayed_until timestamp without time zone, expires timestamp without time zone) OWNER TO postgres;
 
 --
--- TOC entry 24 (class 1255 OID 16640)
--- Dependencies: 7
+-- TOC entry 829 (class 1255 OID 79604)
+-- Dependencies: 1170 1170 8 1170
+-- Name: post_users(hstore, hstore, hstore, timestamp without time zone, timestamp without time zone); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION post_users(data hstore, headers hstore DEFAULT NULL::hstore, properties hstore DEFAULT NULL::hstore, delayed_until timestamp without time zone DEFAULT NULL::timestamp without time zone, expires timestamp without time zone DEFAULT NULL::timestamp without time zone) RETURNS text
+    LANGUAGE sql
+    AS $_$
+ notify QN_users;
+ select mbus4.run_trigger('users', $1, $2, $3, $4, $5);
+ insert into mbus4.qt$users(data, 
+                                headers, 
+                                properties, 
+                                delayed_until, 
+                                expires, 
+                                added, 
+                                iid, 
+                                received
+                               )values(
+                                $1,
+                                hstore('enqueue_time',now()::timestamp::text) ||
+                                hstore('source_db', current_database())       ||
+                                case when $2 is null then hstore('seenby','{' || current_database() || '}') else hstore('seenby', (($2->'seenby')::text[] || current_database()::text)::text) end,
+                                $3,
+                                coalesce($4, now() - '1h'::interval),
+                                $5, 
+                                now(), 
+                                current_database() || '.' || nextval('mbus4.seq') || '.' || txid_current() || '.' || md5($1::text), 
+                                array[]::int[] 
+                               ) returning iid;
+$_$;
+
+
+ALTER FUNCTION mbus4.post_users(data hstore, headers hstore, properties hstore, delayed_until timestamp without time zone, expires timestamp without time zone) OWNER TO postgres;
+
+--
+-- TOC entry 817 (class 1255 OID 76785)
+-- Dependencies: 8
 -- Name: readme(); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -755,8 +1051,8 @@ $_$;
 ALTER FUNCTION mbus4.readme() OWNER TO postgres;
 
 --
--- TOC entry 28 (class 1255 OID 16657)
--- Dependencies: 378 7
+-- TOC entry 818 (class 1255 OID 76787)
+-- Dependencies: 8 1230
 -- Name: regenerate_functions(); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -872,8 +1168,8 @@ $_X$;
 ALTER FUNCTION mbus4.regenerate_functions() OWNER TO postgres;
 
 --
--- TOC entry 33 (class 1255 OID 17086)
--- Dependencies: 343 7 378 343 343
+-- TOC entry 819 (class 1255 OID 76788)
+-- Dependencies: 1230 8 1170 1170 1170
 -- Name: run_trigger(text, hstore, hstore, hstore, timestamp without time zone, timestamp without time zone); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
 
@@ -904,7 +1200,7 @@ begin
     end;  
      continue mainloop when not res;
    end if;
-   perform mbus4.post(r.dst, data:=run_trigger.data, properties:=run_trigger.properties, headers:=run_trigger.headers);
+   perform mbus4.post(r.dst, data:=run_trigger.data, properties:=coalesce(run_trigger.properties,''::hstore) || hstore('source_queue',qname), headers:=run_trigger.headers );
   end loop;
 end;
 $_$;
@@ -913,8 +1209,23 @@ $_$;
 ALTER FUNCTION mbus4.run_trigger(qname text, data hstore, headers hstore, properties hstore, delayed_until timestamp without time zone, expires timestamp without time zone) OWNER TO postgres;
 
 --
--- TOC entry 1824 (class 1259 OID 16658)
--- Dependencies: 7
+-- TOC entry 849 (class 1255 OID 79609)
+-- Dependencies: 1174 8
+-- Name: take_from_users_by_default(text); Type: FUNCTION; Schema: mbus4; Owner: postgres
+--
+
+CREATE FUNCTION take_from_users_by_default(msgid text) RETURNS qt_model
+    LANGUAGE sql
+    AS $_$
+     update mbus4.qt$users t set received=received || 207 where iid=$1 and 207 <> ALL(received) returning *;
+  $_$;
+
+
+ALTER FUNCTION mbus4.take_from_users_by_default(msgid text) OWNER TO postgres;
+
+--
+-- TOC entry 2717 (class 1259 OID 76789)
+-- Dependencies: 8
 -- Name: consumer; Type: TABLE; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -930,8 +1241,8 @@ CREATE TABLE consumer (
 ALTER TABLE mbus4.consumer OWNER TO postgres;
 
 --
--- TOC entry 1825 (class 1259 OID 16664)
--- Dependencies: 1824 7
+-- TOC entry 2718 (class 1259 OID 76795)
+-- Dependencies: 8 2717
 -- Name: consumer_id_seq; Type: SEQUENCE; Schema: mbus4; Owner: postgres
 --
 
@@ -946,8 +1257,8 @@ CREATE SEQUENCE consumer_id_seq
 ALTER TABLE mbus4.consumer_id_seq OWNER TO postgres;
 
 --
--- TOC entry 1965 (class 0 OID 0)
--- Dependencies: 1825
+-- TOC entry 2863 (class 0 OID 0)
+-- Dependencies: 2718
 -- Name: consumer_id_seq; Type: SEQUENCE OWNED BY; Schema: mbus4; Owner: postgres
 --
 
@@ -955,17 +1266,17 @@ ALTER SEQUENCE consumer_id_seq OWNED BY consumer.id;
 
 
 --
--- TOC entry 1966 (class 0 OID 0)
--- Dependencies: 1825
+-- TOC entry 2864 (class 0 OID 0)
+-- Dependencies: 2718
 -- Name: consumer_id_seq; Type: SEQUENCE SET; Schema: mbus4; Owner: postgres
 --
 
-SELECT pg_catalog.setval('consumer_id_seq', 221, true);
+SELECT pg_catalog.setval('consumer_id_seq', 207, true);
 
 
 --
--- TOC entry 1826 (class 1259 OID 16666)
--- Dependencies: 7 1823
+-- TOC entry 2719 (class 1259 OID 76797)
+-- Dependencies: 2716 8
 -- Name: qt_model_id_seq; Type: SEQUENCE; Schema: mbus4; Owner: postgres
 --
 
@@ -980,8 +1291,8 @@ CREATE SEQUENCE qt_model_id_seq
 ALTER TABLE mbus4.qt_model_id_seq OWNER TO postgres;
 
 --
--- TOC entry 1967 (class 0 OID 0)
--- Dependencies: 1826
+-- TOC entry 2865 (class 0 OID 0)
+-- Dependencies: 2719
 -- Name: qt_model_id_seq; Type: SEQUENCE OWNED BY; Schema: mbus4; Owner: postgres
 --
 
@@ -989,17 +1300,17 @@ ALTER SEQUENCE qt_model_id_seq OWNED BY qt_model.id;
 
 
 --
--- TOC entry 1968 (class 0 OID 0)
--- Dependencies: 1826
+-- TOC entry 2866 (class 0 OID 0)
+-- Dependencies: 2719
 -- Name: qt_model_id_seq; Type: SEQUENCE SET; Schema: mbus4; Owner: postgres
 --
 
-SELECT pg_catalog.setval('qt_model_id_seq', 14369016, true);
+SELECT pg_catalog.setval('qt_model_id_seq', 13240625, true);
 
 
 --
--- TOC entry 1827 (class 1259 OID 16668)
--- Dependencies: 1939 343 7 343 343
+-- TOC entry 2720 (class 1259 OID 76799)
+-- Dependencies: 2832 8 1170 1170 1170
 -- Name: dmq; Type: TABLE; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1019,8 +1330,29 @@ CREATE TABLE dmq (
 ALTER TABLE mbus4.dmq OWNER TO postgres;
 
 --
--- TOC entry 1828 (class 1259 OID 16675)
--- Dependencies: 7
+-- TOC entry 2742 (class 1259 OID 79595)
+-- Dependencies: 2835 1170 1170 8 1170
+-- Name: qt$users; Type: TABLE; Schema: mbus4; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE "qt$users" (
+    id integer DEFAULT nextval('qt_model_id_seq'::regclass) NOT NULL,
+    added timestamp without time zone NOT NULL,
+    iid text NOT NULL,
+    delayed_until timestamp without time zone NOT NULL,
+    expires timestamp without time zone,
+    received integer[],
+    headers hstore,
+    properties hstore,
+    data hstore
+);
+
+
+ALTER TABLE mbus4."qt$users" OWNER TO postgres;
+
+--
+-- TOC entry 2721 (class 1259 OID 76806)
+-- Dependencies: 8
 -- Name: queue; Type: TABLE; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1034,8 +1366,8 @@ CREATE TABLE queue (
 ALTER TABLE mbus4.queue OWNER TO postgres;
 
 --
--- TOC entry 1829 (class 1259 OID 16681)
--- Dependencies: 1828 7
+-- TOC entry 2722 (class 1259 OID 76812)
+-- Dependencies: 2721 8
 -- Name: queue_id_seq; Type: SEQUENCE; Schema: mbus4; Owner: postgres
 --
 
@@ -1050,8 +1382,8 @@ CREATE SEQUENCE queue_id_seq
 ALTER TABLE mbus4.queue_id_seq OWNER TO postgres;
 
 --
--- TOC entry 1969 (class 0 OID 0)
--- Dependencies: 1829
+-- TOC entry 2867 (class 0 OID 0)
+-- Dependencies: 2722
 -- Name: queue_id_seq; Type: SEQUENCE OWNED BY; Schema: mbus4; Owner: postgres
 --
 
@@ -1059,17 +1391,17 @@ ALTER SEQUENCE queue_id_seq OWNED BY queue.id;
 
 
 --
--- TOC entry 1970 (class 0 OID 0)
--- Dependencies: 1829
+-- TOC entry 2868 (class 0 OID 0)
+-- Dependencies: 2722
 -- Name: queue_id_seq; Type: SEQUENCE SET; Schema: mbus4; Owner: postgres
 --
 
-SELECT pg_catalog.setval('queue_id_seq', 133, true);
+SELECT pg_catalog.setval('queue_id_seq', 122, true);
 
 
 --
--- TOC entry 1830 (class 1259 OID 16683)
--- Dependencies: 7
+-- TOC entry 2723 (class 1259 OID 76814)
+-- Dependencies: 8
 -- Name: seq; Type: SEQUENCE; Schema: mbus4; Owner: postgres
 --
 
@@ -1084,17 +1416,17 @@ CREATE SEQUENCE seq
 ALTER TABLE mbus4.seq OWNER TO postgres;
 
 --
--- TOC entry 1971 (class 0 OID 0)
--- Dependencies: 1830
+-- TOC entry 2869 (class 0 OID 0)
+-- Dependencies: 2723
 -- Name: seq; Type: SEQUENCE SET; Schema: mbus4; Owner: postgres
 --
 
-SELECT pg_catalog.setval('seq', 14369017, true);
+SELECT pg_catalog.setval('seq', 13240626, true);
 
 
 --
--- TOC entry 1831 (class 1259 OID 16685)
--- Dependencies: 1941 343 343 343 7
+-- TOC entry 2724 (class 1259 OID 76816)
+-- Dependencies: 2834 1170 1170 1170 8
 -- Name: tempq; Type: TABLE; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1114,8 +1446,8 @@ CREATE TABLE tempq (
 ALTER TABLE mbus4.tempq OWNER TO postgres;
 
 --
--- TOC entry 1833 (class 1259 OID 17074)
--- Dependencies: 7
+-- TOC entry 2725 (class 1259 OID 76823)
+-- Dependencies: 8
 -- Name: trigger; Type: TABLE; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1129,8 +1461,8 @@ CREATE TABLE trigger (
 ALTER TABLE mbus4.trigger OWNER TO postgres;
 
 --
--- TOC entry 1938 (class 2604 OID 16692)
--- Dependencies: 1825 1824
+-- TOC entry 2831 (class 2604 OID 76829)
+-- Dependencies: 2718 2717
 -- Name: id; Type: DEFAULT; Schema: mbus4; Owner: postgres
 --
 
@@ -1138,8 +1470,8 @@ ALTER TABLE consumer ALTER COLUMN id SET DEFAULT nextval('consumer_id_seq'::regc
 
 
 --
--- TOC entry 1937 (class 2604 OID 16693)
--- Dependencies: 1826 1823
+-- TOC entry 2830 (class 2604 OID 76830)
+-- Dependencies: 2719 2716
 -- Name: id; Type: DEFAULT; Schema: mbus4; Owner: postgres
 --
 
@@ -1147,8 +1479,8 @@ ALTER TABLE qt_model ALTER COLUMN id SET DEFAULT nextval('qt_model_id_seq'::regc
 
 
 --
--- TOC entry 1940 (class 2604 OID 16694)
--- Dependencies: 1829 1828
+-- TOC entry 2833 (class 2604 OID 76831)
+-- Dependencies: 2722 2721
 -- Name: id; Type: DEFAULT; Schema: mbus4; Owner: postgres
 --
 
@@ -1156,18 +1488,19 @@ ALTER TABLE queue ALTER COLUMN id SET DEFAULT nextval('queue_id_seq'::regclass);
 
 
 --
--- TOC entry 1958 (class 0 OID 16658)
--- Dependencies: 1824
+-- TOC entry 2855 (class 0 OID 76789)
+-- Dependencies: 2717
 -- Data for Name: consumer; Type: TABLE DATA; Schema: mbus4; Owner: postgres
 --
 
 COPY consumer (id, name, qname, selector, added) FROM stdin;
+207	default	users	1=1	2011-09-26 16:45:41.996333
 \.
 
 
 --
--- TOC entry 1959 (class 0 OID 16668)
--- Dependencies: 1827
+-- TOC entry 2856 (class 0 OID 76799)
+-- Dependencies: 2720
 -- Data for Name: dmq; Type: TABLE DATA; Schema: mbus4; Owner: postgres
 --
 
@@ -1176,8 +1509,18 @@ COPY dmq (id, added, iid, delayed_until, expires, received, headers, properties,
 
 
 --
--- TOC entry 1957 (class 0 OID 16643)
--- Dependencies: 1823
+-- TOC entry 2860 (class 0 OID 79595)
+-- Dependencies: 2742
+-- Data for Name: qt$users; Type: TABLE DATA; Schema: mbus4; Owner: postgres
+--
+
+COPY "qt$users" (id, added, iid, delayed_until, expires, received, headers, properties, data) FROM stdin;
+\.
+
+
+--
+-- TOC entry 2854 (class 0 OID 76769)
+-- Dependencies: 2716
 -- Data for Name: qt_model; Type: TABLE DATA; Schema: mbus4; Owner: postgres
 --
 
@@ -1186,18 +1529,19 @@ COPY qt_model (id, added, iid, delayed_until, expires, received, headers, proper
 
 
 --
--- TOC entry 1960 (class 0 OID 16675)
--- Dependencies: 1828
+-- TOC entry 2857 (class 0 OID 76806)
+-- Dependencies: 2721
 -- Data for Name: queue; Type: TABLE DATA; Schema: mbus4; Owner: postgres
 --
 
 COPY queue (id, qname, consumers_cnt) FROM stdin;
+122	users	64
 \.
 
 
 --
--- TOC entry 1961 (class 0 OID 16685)
--- Dependencies: 1831
+-- TOC entry 2858 (class 0 OID 76816)
+-- Dependencies: 2724
 -- Data for Name: tempq; Type: TABLE DATA; Schema: mbus4; Owner: postgres
 --
 
@@ -1206,8 +1550,8 @@ COPY tempq (id, added, iid, delayed_until, expires, received, headers, propertie
 
 
 --
--- TOC entry 1962 (class 0 OID 17074)
--- Dependencies: 1833
+-- TOC entry 2859 (class 0 OID 76823)
+-- Dependencies: 2725
 -- Data for Name: trigger; Type: TABLE DATA; Schema: mbus4; Owner: postgres
 --
 
@@ -1216,8 +1560,8 @@ COPY trigger (src, dst, selector) FROM stdin;
 
 
 --
--- TOC entry 1945 (class 2606 OID 16696)
--- Dependencies: 1824 1824
+-- TOC entry 2839 (class 2606 OID 76833)
+-- Dependencies: 2717 2717
 -- Name: consumer_pkey; Type: CONSTRAINT; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1226,8 +1570,8 @@ ALTER TABLE ONLY consumer
 
 
 --
--- TOC entry 1947 (class 2606 OID 16698)
--- Dependencies: 1827 1827
+-- TOC entry 2841 (class 2606 OID 76835)
+-- Dependencies: 2720 2720
 -- Name: dmq_iid_key; Type: CONSTRAINT; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1236,8 +1580,18 @@ ALTER TABLE ONLY dmq
 
 
 --
--- TOC entry 1943 (class 2606 OID 16700)
--- Dependencies: 1823 1823
+-- TOC entry 2853 (class 2606 OID 79603)
+-- Dependencies: 2742 2742
+-- Name: qt$users_iid_key; Type: CONSTRAINT; Schema: mbus4; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY "qt$users"
+    ADD CONSTRAINT "qt$users_iid_key" UNIQUE (iid);
+
+
+--
+-- TOC entry 2837 (class 2606 OID 76837)
+-- Dependencies: 2716 2716
 -- Name: qt_model_iid_key; Type: CONSTRAINT; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1246,8 +1600,8 @@ ALTER TABLE ONLY qt_model
 
 
 --
--- TOC entry 1949 (class 2606 OID 16702)
--- Dependencies: 1828 1828
+-- TOC entry 2843 (class 2606 OID 76839)
+-- Dependencies: 2721 2721
 -- Name: queue_pkey; Type: CONSTRAINT; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1256,8 +1610,8 @@ ALTER TABLE ONLY queue
 
 
 --
--- TOC entry 1951 (class 2606 OID 16704)
--- Dependencies: 1828 1828
+-- TOC entry 2845 (class 2606 OID 76841)
+-- Dependencies: 2721 2721
 -- Name: queue_qname_key; Type: CONSTRAINT; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1266,8 +1620,8 @@ ALTER TABLE ONLY queue
 
 
 --
--- TOC entry 1953 (class 2606 OID 16706)
--- Dependencies: 1831 1831
+-- TOC entry 2847 (class 2606 OID 76843)
+-- Dependencies: 2724 2724
 -- Name: tempq_iid_key; Type: CONSTRAINT; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1276,8 +1630,8 @@ ALTER TABLE ONLY tempq
 
 
 --
--- TOC entry 1956 (class 2606 OID 17081)
--- Dependencies: 1833 1833 1833
+-- TOC entry 2850 (class 2606 OID 76845)
+-- Dependencies: 2725 2725 2725
 -- Name: trigger_src_dst; Type: CONSTRAINT; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
@@ -1286,15 +1640,24 @@ ALTER TABLE ONLY trigger
 
 
 --
--- TOC entry 1954 (class 1259 OID 16707)
--- Dependencies: 1831 1091 1831 1091 1831
+-- TOC entry 2851 (class 1259 OID 79610)
+-- Dependencies: 2742 2742 2742 2742
+-- Name: qt$users_for_default; Type: INDEX; Schema: mbus4; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX "qt$users_for_default" ON "qt$users" USING btree (added, delayed_until) WHERE (((207 <> ALL (received)) AND ((1 = 1) = true)) AND (added > '2011-09-26 16:45:41.996333'::timestamp without time zone));
+
+
+--
+-- TOC entry 2848 (class 1259 OID 76846)
+-- Dependencies: 2724 1983 2724 1983 2724
 -- Name: tempq_name_added; Type: INDEX; Schema: mbus4; Owner: postgres; Tablespace: 
 --
 
 CREATE INDEX tempq_name_added ON tempq USING btree (((headers -> 'tempq'::text)), added) WHERE ((headers -> 'tempq'::text) IS NOT NULL);
 
 
--- Completed on 2011-07-05 13:13:55
+-- Completed on 2011-10-11 15:00:56
 
 --
 -- PostgreSQL database dump complete
