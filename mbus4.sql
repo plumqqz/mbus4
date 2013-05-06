@@ -153,22 +153,13 @@ set local enable_seqscan=off;
         end;
       end loop;
   else
-     cnt:=<!consumers!>;
-     for r in
-      select iid
-        from mbus4.qt$<!qname!> t
-       where <!consumer_id!><>all(received) and t.delayed_until<now() and (<!selector!>)=true and added > '<!now!>' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
+      select *
+        into rv
+        from mbus4.qt$test1 t
+       where 1<>all(received) and t.delayed_until<now() and (1=1)=true and added > '2013-05-06 10:21:53.778' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
          and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
-      loop
-         if pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || r.iid))::bit(64)::bigint ) then
-           select * into rv from mbus4.qt$<!qname!> t where t.iid=r.iid and <!consumer_id!><>all(received) for update;
-           if found then
-             exit;
-           end if;
-         end if;
-         cnt:=cnt-1;
-         exit when cnt=0;
-      end loop;
+         and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$test1.' || t.iid))::bit(64)::bigint )
+         for update;
   end if;
 
 
@@ -240,28 +231,20 @@ if version() like 'PostgreSQL 9.0%' then
        exit when not inloop;
     end loop;
   else
-   while coalesce(array_length(rvarr,1),0)<amt loop
-       inloop:=false;
-       for r in select *
-                  from mbus4.qt$<!qname!> t
-                 where <!c_id!><>all(received)
-                   and t.delayed_until<now()
-                   and (<!selector!>)=true
-                   and added > '<!now!>'
-                   and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
-                   and t.iid not in (select a.iid from unnest(rvarr) as a)
-                   and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
-                 limit amt
-       loop
-         inloop:=true;
-         if pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || r.iid))::bit(64)::bigint ) then
-           select * into rv from mbus4.qt$<!qname!> t where t.iid=r.iid and <!c_id!><>all(received) for update;
-           continue when not found;
-           rvarr:=rvarr||rv;
-         end if;
-       end loop;
-       exit when not inloop;
-    end loop;
+    rvarr:=array(select row(t.* )::mbus4.qt_model
+                   from mbus4.qt$<!qname!> t
+                  where <!c_id!><>all(received)
+                    and t.delayed_until<now()
+                    and (<!selector!>)=true
+                    and added > '<!now!>'
+                    and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
+                    and t.iid not in (select a.iid from unnest(rvarr) as a)
+                    and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
+                    and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || t.iid))::bit(64)::bigint )
+                  order by added, delayed_until
+                  limit amt
+                    for update
+                );
 end if;
 
 if array_length(rvarr,1)>0 then
