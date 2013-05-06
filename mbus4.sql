@@ -141,7 +141,6 @@ set local enable_seqscan=off;
         from mbus4.qt$<!qname!> t
        where <!consumer_id!><>all(received) and t.delayed_until<now() and (<!selector!>)=true and added >'<!now!>' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
          and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
-       order by added, delayed_until
        limit <!consumers!>
       loop
         begin
@@ -160,7 +159,6 @@ set local enable_seqscan=off;
         from mbus4.qt$<!qname!> t
        where <!consumer_id!><>all(received) and t.delayed_until<now() and (<!selector!>)=true and added > '<!now!>' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
          and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
-       order by added, delayed_until
       loop
          if pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || r.iid))::bit(64)::bigint ) then
            select * into rv from mbus4.qt$<!qname!> t where t.iid=r.iid and <!consumer_id!><>all(received) for update;
@@ -228,7 +226,6 @@ if version() like 'PostgreSQL 9.0%' then
                    and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
                    and t.iid not in (select a.iid from unnest(rvarr) as a)
                    and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
-                 order by added, delayed_until
                  limit amt
        loop
           inloop:=true;
@@ -254,7 +251,6 @@ if version() like 'PostgreSQL 9.0%' then
                    and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
                    and t.iid not in (select a.iid from unnest(rvarr) as a)
                    and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
-                 order by added, delayed_until
                  limit amt
        loop
          inloop:=true;
