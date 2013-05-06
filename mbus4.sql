@@ -156,9 +156,12 @@ set local enable_seqscan=off;
       select *
         into rv
         from mbus4.qt$<!qname!> t
-       where 1<>all(received) and t.delayed_until<now() and (1=1)=true and added > '2013-05-06 10:21:53.778' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
-         and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
-         and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>' || t.iid))::bit(64)::bigint )
+       where 1<>all(received) and t.delayed_until<now() and (1=1)=true and added > '<!now!>' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
+         and ((t.headers->'consume_after') is null or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
+         --and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>' || t.iid))::bit(64)::bigint )
+         and pg_try_advisory_xact_lock( hashtext('mbus4.qt$<!qname!>' || t.iid))
+         order by added, delayed_until
+         limit 1
          for update;
   end if;
 
@@ -239,8 +242,9 @@ if version() like 'PostgreSQL 9.0%' then
                     and added > '<!now!>'
                     and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
                     and t.iid not in (select a.iid from unnest(rvarr) as a)
-                    and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
-                    and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || t.iid))::bit(64)::bigint )
+                    and ((t.headers->'consume_after') is null or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
+--                    and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>.' || t.iid))::bit(64)::bigint )
+                    and pg_try_advisory_xact_lock( hashtext('mbus4.qt$<!qname!>' || t.iid))
                   order by added, delayed_until
                   limit amt
                     for update
