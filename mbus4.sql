@@ -262,6 +262,7 @@ if version() like 'PostgreSQL 9.0%' then
        end loop;
        exit when not inloop;
     end loop;
+end if;
 
 if array_length(rvarr,1)>0 then
    for rv in select * from unnest(rvarr) loop
