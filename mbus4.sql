@@ -155,10 +155,10 @@ set local enable_seqscan=off;
   else
       select *
         into rv
-        from mbus4.qt$test1 t
+        from mbus4.qt$<!qname!> t
        where 1<>all(received) and t.delayed_until<now() and (1=1)=true and added > '2013-05-06 10:21:53.778' and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
          and (not exist(t.headers,'consume_after') or (select every(not mbus4.is_msg_exists(u.v)) from unnest( ((t.headers)->'consume_after')::text[]) as u(v)))
-         and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$test1.' || t.iid))::bit(64)::bigint )
+         and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$<!qname!>' || t.iid))::bit(64)::bigint )
          for update;
   end if;
 
