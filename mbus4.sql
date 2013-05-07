@@ -346,7 +346,7 @@ insert into mbus4.qt$<!qname!>(data,
                                 coalesce($2,''::hstore)||
                                 hstore('enqueue_time',now()::timestamp::text) ||
                                 hstore('source_db', current_database())       ||
-                                hstore('destination_queue', $Q$<!qname!>$Q$)       || case when exist($2,'consume_after') then hstore('consume_after',($2->'consume_after')::text[]::text) else ''::hstore end ||
+                                hstore('destination_queue', $Q$<!qname!>$Q$)       ||
                                 case when $2 is null or not exist($2,'seenby') then hstore('seenby','{' || current_database() || '}') else hstore('seenby', (($2->'seenby')::text[] || current_database()::text)::text) end,
                                 $3,
                                 coalesce($4, now() - '1h'::interval),
