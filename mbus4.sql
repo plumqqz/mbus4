@@ -945,6 +945,7 @@ oldqname text:='';
 visibilty_qry text:='';
 msg_exists_qry text:='';
 begin
+set local check_function_bodies=false;
 for r in select * from mbus4.queue loop
    post_qry       := post_qry || $$ when '$$ || lower(r.qname) || $$' then return mbus4.post_$$ || r.qname || '(data, headers, properties, delayed_until, expires);'||chr(10);
    msg_exists_qry := msg_exists_qry || 'when $1 like $LIKE$' || lower(r.qname) || '.%$LIKE$ then exists(select * from mbus4.qt$' || r.qname || ' q where q.iid=$1 and not mbus4.build_' || r.qname ||'_record_consumer_list(row(q.*)::mbus4.qt_model) <@ q.received)'||chr(10);
