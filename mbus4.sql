@@ -179,6 +179,7 @@ end if;
 end;
 $DDD$
   LANGUAGE plpgsql VOLATILE
+  set enable_seqscan to off
 $CONS_SRC$;
 
 cons_src:=regexp_replace(cons_src,'<!qname!>', qname, 'g');
@@ -265,6 +266,7 @@ end if;
 end;
 $DDD$
   LANGUAGE plpgsql VOLATILE
+  set enable_seqscan to off
 $CONSN_SRC$;
 
 consn_src:=regexp_replace(consn_src,'<!qname!>', qname, 'g');
