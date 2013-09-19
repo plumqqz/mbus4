@@ -58,6 +58,68 @@ CREATE TABLE qt_model (
 
 ALTER TABLE mbus4.qt_model OWNER TO postgres;
 
+-- Function: string_format(text, hstore)
+
+-- DROP FUNCTION string_format(text, hstore);
+
+CREATE OR REPLACE FUNCTION string_format(format text, param hstore)
+  RETURNS text AS
+$BODY$
+/*
+Форматирует строку в соответствии с заданным шаблоном
+%"name" || || %{name} - quote_ident
+%'name' || %[name] - вставляется quote_literal(param->'name')
+%<var> - as is
+%#html# - quote_html
+%[-!@#$^&*=+] - т.е. %-, %!, %@, %#, %$, %^, %&, &* - то as is из param->'-', param->'!' и т.п.
+explain analyze
+select string_format($$%"name" == %{name} is %[value] == %'value' and n=%<n> and name=%'name' %%<v> and html=%#amp# and %#$$, hstore('name','la la') || hstore('value', 'The Value')||hstore('n',n::text)||hstore('amp','<a href="lakak">')||hstore('#','hash sign'))
+  from generate_series(1,100) as gs(n);
+*/
+select
+  string_agg(
+         case when s[1] like '^%"%"' escape '^' or s[1] like '^%{%}' escape '^'
+                then coalesce(quote_ident($2->(substr(s[1],3,length(s[1])-3))),quote_ident(''))
+              when s[1] like $$^%'%'$$ escape '^' or s[1] like $$^%[%]$$ escape '^'
+                then coalesce(quote_literal($2->(substr(s[1],3,length(s[1])-3))),quote_literal(''))
+              when s[1] like '^%<%>' escape '^'
+                then coalesce($2->(substr(s[1],3,length(s[1])-3)),'')
+              when s[1] like '^%#%#' escape '^'
+                then coalesce(quote_html(($2->(substr(s[1],3,length(s[1])-3)))),'')
+              when s[1] ~ '%[-!@#$^&*=+]'
+                then coalesce($2->(substr(s[1],2,1)),'')
+              when s[1]='%%'
+                then '%'
+              else
+               s[1]
+         end,'') as s
+      from regexp_matches($1,
+                         $RE$
+                         (%%
+                          |
+                          %[$@]
+                          |
+                          % ([['"<{#]) [$@\w]+ ([]"'>}#])
+                          |
+                          %[-!@#$^&*=+]
+                          |
+                          (?: [^%]+ | %(?! [<{'"] ) )
+                         )
+                         $RE$,
+                         'gx')
+                         as re(s);
+$BODY$
+  LANGUAGE sql IMMUTABLE
+  COST 100;
+
+create or replace function raise_exception(exc text) returns void as
+$code$
+ begin
+  raise exception '%', exc;
+ end;
+$code$
+language plpgsql;
+
 --
 -- Name: consume(text, text); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
@@ -331,10 +393,11 @@ begin
 execute 'create table ' || schname || '.qt$' || qname || '( like ' || schname || '.qt_model including all)';
 insert into mbus4.queue(qname,consumers_cnt) values(qname,consumers_cnt);
 post_src := $post_src$
-CREATE OR REPLACE FUNCTION mbus4.post_<!qname!>(data hstore, headers hstore DEFAULT NULL::hstore, properties hstore DEFAULT NULL::hstore, delayed_until timestamp without time zone DEFAULT NULL::timestamp without time zone, expires timestamp without time zone DEFAULT NULL::timestamp without time zone)
+CREATE OR REPLACE FUNCTION mbus4.post_<!qname!>(data hstore, headers hstore DEFAULT NULL::hstore, properties hstore DEFAULT NULL::hstore, delayed_until timestamp without time zone DEFAULT NULL::timestamp without time zone, expires timestamp without time zone DEFAULT NULL::timestamp without time zone, iid text default null)
   RETURNS text AS
 $BDY$
 select mbus4.run_trigger('<!qname!>', $1, $2, $3, $4, $5);
+select mbus4.raise_exception('Wrong iid=' || $6 || ' for queue <!qname!>') where $6 is not null and $6 not like $Q$<!qname!>.%$Q$ and $6 not like $Q$dmq.%$Q$;
 insert into mbus4.qt$<!qname!>(data,
                                 headers,
                                 properties,
@@ -349,12 +412,13 @@ insert into mbus4.qt$<!qname!>(data,
                                 hstore('enqueue_time',now()::timestamp::text) ||
                                 hstore('source_db', current_database())       ||
                                 hstore('destination_queue', $Q$<!qname!>$Q$)       ||
+                                case when $2 is not null and exist($2,'consume_after')  then hstore('consume_after', ($2->'consume_after')::text[]::text) else ''::hstore end ||
                                 case when $2 is null or not exist($2,'seenby') then hstore('seenby','{' || current_database() || '}') else hstore('seenby', (($2->'seenby')::text[] || current_database()::text)::text) end,
                                 $3,
                                 coalesce($4, now() - '1h'::interval),
                                 $5,
                                 now(),
-                                $Q$<!qname!>$Q$ || '.' || nextval('mbus4.seq'),
+                                coalesce($6, $Q$<!qname!>$Q$ || '.' || nextval('mbus4.seq')),
                                 array[]::int[]
                                ) returning iid;
 $BDY$
@@ -744,6 +808,29 @@ $_$;
 
 ALTER FUNCTION mbus4.post_temp(tqname text, data hstore, headers hstore, properties hstore, delayed_until timestamp without time zone, expires timestamp without time zone) OWNER TO postgres;
 
+CREATE FUNCTION post_dmq(data hstore, headers hstore DEFAULT NULL::hstore, properties hstore DEFAULT NULL::hstore, delayed_until timestamp without time zone DEFAULT NULL::timestamp without time zone, expires timestamp without time zone DEFAULT NULL::timestamp without time zone, iid text default null) RETURNS text
+    LANGUAGE sql
+    AS $_$
+insert into mbus4.dmq(data,
+                      headers,
+                      properties,
+                      delayed_until,
+                      expires,
+                      added,
+                      iid
+                     )values(
+                      $1,
+                      $2,
+                      $3,
+                      coalesce($4, now()),
+                      $5,
+                      now(),
+                      coalesce($6,'dmq.' || nextval('mbus4.seq') || '.' || txid_current() || '.' || md5($1::text))
+                     ) returning iid;
+
+$_$;
+
+
 --
 -- Name: readme(); Type: FUNCTION; Schema: mbus4; Owner: postgres
 --
@@ -882,6 +969,10 @@ Payload'ом очереди является значение hstore (так что тип hstore должен быть уста
      указывать параметр noindex - тогда индекс не будет создаваться, но текст запроса для
      создания требуемого индекса будет возвращен как raise notice.
 
+     dmq (deam message queue)
+     Это, в общем, обычная очередь - за одним исключением - она не чистится, ее надо выгребать самостоятельно.
+     Кроме того, если сообщение попало в dmq, то связанные с ним сообщения не будут выбраны, а при чистке попадут туда же (пока не сделано).
+
      create_run_function(qname text)
      Генерирует функцию вида:
        for r in select * from mbus4.consumen_<!qname!>_by_default(100) loop
@@ -923,6 +1014,8 @@ Payload'ом очереди является значение hstore (так что тип hstore должен быть уста
 
      Таким образом пользователь будет скопирован на сервера, на каждом из них будет установлен лимит, установлены ссылки на профайлы
      и удален пользователь на локальном сервере.
+
+         !!!!!  При невозможности обработать сообщение оно должно быть помещено обратно в ту же очередь со старым iid !!!!!!
      
      Внимание!
        При использовании упорядочения сообщений может потребоваться создать индекс на колонку iid в соответствующей таблице (mbus4.qt$<qname>)
@@ -953,7 +1046,7 @@ msg_exists_qry text:='';
 begin
 set local check_function_bodies=false;
 for r in select * from mbus4.queue loop
-   post_qry       := post_qry || $$ when '$$ || lower(r.qname) || $$' then return mbus4.post_$$ || r.qname || '(data, headers, properties, delayed_until, expires);'||chr(10);
+   post_qry       := post_qry || $$ when '$$ || lower(r.qname) || $$' then return mbus4.post_$$ || r.qname || '(data, headers, properties, delayed_until, expires, iid);'||chr(10);
    msg_exists_qry := msg_exists_qry || 'when $1 like $LIKE$' || lower(r.qname) || '.%$LIKE$ then exists(select * from mbus4.qt$' || r.qname || ' q where q.iid=$1 and not mbus4.build_' || r.qname ||'_record_consumer_list(row(q.*)::mbus4.qt_model) <@ q.received)'||chr(10);
 end loop;
 
@@ -966,12 +1059,14 @@ if post_qry='' then
 else
         execute $FUNC$
         ---------------------------------------------------------------------------------------------------------------------------------------------
-        create or replace function mbus4.post(qname text, data hstore, headers hstore default null, properties hstore default null, delayed_until timestamp default null, expires timestamp default null)
+        create or replace function mbus4.post(qname text, data hstore, headers hstore default null, properties hstore default null, delayed_until timestamp default null, expires timestamp default null, iid text default null)
         returns text as
         $QQ$
          begin
           if qname like 'temp.%' then
             return mbus4.post_temp(qname, data, headers, properties, delayed_until, expires);
+          elsif qname ='dmq' then
+            return mbus4.post_dmq(data, headers, properties, delayed_until, expires, iid);
           end if;
           case lower(qname) $FUNC$ || post_qry || $FUNC$
           else
@@ -990,7 +1085,7 @@ else
                     $FUNC$
                     else
                      false 
-                    end;
+                    end or exists(select * from mbus4.dmq q where q.iid=$1);
                 $code$
                 language sql
         $FUNC$;
