@@ -131,6 +131,9 @@ CREATE FUNCTION consume(qname text, cname text DEFAULT 'default'::text) RETURNS 
           if qname like 'temp.%' then
             return query select * from mbus4.consume_temp(qname);
             return;
+          elsif qname='dmq' then
+            return query select * from mbus4.consume_dmq();
+            return;
           end if;
          case lower(qname)
          when 'work1' then case lower(cname)  when 'default' then return query select * from mbus4.consume_work1_by_default(); return; else raise exception $$unknown consumer:%$$, consumer; end case;
@@ -162,7 +165,24 @@ end;
 $$;
 
 
-ALTER FUNCTION mbus4.consume_temp(tqname text) OWNER TO postgres;
+CREATE FUNCTION consume_dmq() RETURNS SETOF qt_model
+    LANGUAGE plpgsql
+    AS $$
+declare
+  rv mbus4.qt_model;
+begin
+   select * into rv 
+     from mbus4.dmq t 
+    where pg_try_advisory_xact_lock( hashtext('mbus4.dmq' || t.iid)) 
+    order by added limit 1;
+
+    if rv.id is not null then
+       delete from mbus4.dmq where iid=rv.iid;
+    return next rv;
+end if;  
+return;
+end;
+$$;
 
 --
 -- Name: create_consumer(text, text, text, boolean); Type: FUNCTION; Schema: mbus4; Owner: postgres
@@ -971,7 +991,10 @@ Payload'ом очереди является значение hstore (так что тип hstore должен быть уста
 
      dmq (deam message queue)
      Это, в общем, обычная очередь - за одним исключением - она не чистится, ее надо выгребать самостоятельно.
-     Кроме того, если сообщение попало в dmq, то связанные с ним сообщения не будут выбраны, а при чистке попадут туда же (пока не сделано).
+     Кроме того, это именно очередь - у нее только один консумер.
+     Кроме того, если сообщение попало в dmq, то связанные с ним механизмом упорядочивания сообщения не будут выбраны.
+                             Внимание!! 
+      !!!!!  При получении сообщений из dmq не работает упорядочивание  !!!!!
 
      create_run_function(qname text)
      Генерирует функцию вида:
@@ -1015,11 +1038,10 @@ Payload'ом очереди является значение hstore (так что тип hstore должен быть уста
      Таким образом пользователь будет скопирован на сервера, на каждом из них будет установлен лимит, установлены ссылки на профайлы
      и удален пользователь на локальном сервере.
 
-         !!!!!  При невозможности обработать сообщение оно должно быть помещено обратно в ту же очередь со старым iid !!!!!!
+         !!!!!  При невозможности обработать сообщение оно должно быть помещено обратно в ту же очередь или в dmq со старым iid !!!!!!
      
      Внимание!
-       При использовании упорядочения сообщений может потребоваться создать индекс на колонку iid в соответствующей таблице (mbus4.qt$<qname>)
-       Кроме того, большое количество сообщений, ожидающих доставки другого сообщения может привести к снижению производительности.
+       Большое количество сообщений, ожидающих доставки другого сообщения может привести к снижению производительности.
 
 
 $TEXT$::text;
@@ -1118,9 +1140,14 @@ else
           if qname like 'temp.%' then
             return query select * from mbus4.consume_temp(qname);
             return;
+          elsif qname='dmq' then
+            return query select * from mbus4.consume_dmq();
+            return;
           end if;
          case lower(qname)
         $FUNC$ || consume_qry || $FUNC$
+         else
+           raise exception 'Unknown queue:%', qname;
          end case;
         end;
         $QQ$
