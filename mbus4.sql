@@ -883,8 +883,10 @@ Payload'ом очереди €вл€етс€ значение hstore (так что тип hstore должен быть уста
                             expires timestamp without time zone DEFAULT NULL::timestamp without time zone)
    где
    data - собственно payload
-   headers - заголовки сообщени€, в общем, не ожидаетс€, что прикладна€ программа(ѕѕ) будет их
-             отправл€ть
+   headers - заголовки сообщени€ - дл€ управлени€ поведением сообщени€
+             можно добавить
+             consume_after => { iid, iid, iid...} - массив сообщений, которые должны быть кем-то уже получены перед
+             тем, как помещаемое сообщение будет получено еще кем-то.
    properties - заголовки сообщени€, предназначенные дл€ ѕѕ
    delayed_until - сообщение будет доставлено ѕќ—Ћ≈ указанной даты. «ачем это надо?
              например, пытаемс€ отправить письмо, почтова€ система недоступна.
@@ -1065,11 +1067,13 @@ consume_qry text:='';
 oldqname text:='';
 visibilty_qry text:='';
 msg_exists_qry text:='';
+peek_qry text:='';
 begin
 set local check_function_bodies=false;
 for r in select * from mbus4.queue loop
    post_qry       := post_qry || $$ when '$$ || lower(r.qname) || $$' then return mbus4.post_$$ || r.qname || '(data, headers, properties, delayed_until, expires, iid);'||chr(10);
    msg_exists_qry := msg_exists_qry || 'when $1 like $LIKE$' || lower(r.qname) || '.%$LIKE$ then exists(select * from mbus4.qt$' || r.qname || ' q where q.iid=$1 and not mbus4.build_' || r.qname ||'_record_consumer_list(row(q.*)::mbus4.qt_model) <@ q.received)'||chr(10);
+   peek_qry:= peek_qry || 'when $1 like $LIKE$' || lower(r.qname) || '.%$LIKE$ then (select row(q.*)::mbus4.qt_model from mbus4.qt$' || r.qname || ' q where q.iid=$1 )'||chr(10);
 end loop;
 
 if post_qry='' then
@@ -1108,6 +1112,19 @@ else
                     else
                      false 
                     end or exists(select * from mbus4.dmq q where q.iid=$1);
+                $code$
+                language sql
+        $FUNC$;
+        execute $FUNC$
+                create or replace function mbus4.peek(msgiid text) returns mbus4.qt_model as
+                $code$
+                 select coalesce(
+                    case $FUNC$
+                     || peek_qry ||
+                    $FUNC$
+                    else
+                     null
+                    end, (select row(q.*)::mbus4.qt_model from mbus4.dmq q where q.iid=$1));
                 $code$
                 language sql
         $FUNC$;
@@ -1247,10 +1264,11 @@ CREATE OR REPLACE FUNCTION mbus4.dyn_consume(qname text, selector text default '
   RETURNS SETOF mbus4.qt_model AS
 $BODY$
 declare
-rv mbus4.qt_model;
-consid integer;
-consadded timestamp;
-hash text:='_'||md5(coalesce(selector,''));
+ rv mbus4.qt_model;
+ consid integer;
+ consadded timestamp;
+ hash text:='_'||md5(coalesce(selector,''));
+ realqname text:= case when qname='dmq' then 'mbus4.dmq' else 'mbus4.qt$' || qname end;
 begin
 set local enable_seqscan=off;
 if selector is null then
@@ -1264,10 +1282,11 @@ select id, added into consid, consadded from mbus4.consumer c where c.qname=dyn_
       execute
       $QRY$prepare mbus4_dyn_consume_$QRY$ || qname||hash || $QRY$(integer, timestamp) as
         select *
-          from mbus4.qt$$QRY$ || qname ||$QRY$ t
+          from $QRY$ || realqname ||$QRY$ t
          where $1<>all(received) and t.delayed_until<now() and (1=1)=true and added > $2 and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
            and ($QRY$ || selector ||$QRY$)
-           and pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$$QRY$ || qname ||$QRY$.' || t.iid))::bit(64)::bigint )
+           and --pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$$QRY$ || qname ||$QRY$.' || t.iid))::bit(64)::bigint )
+               pg_try_advisory_xact_lock( hashtext('$QRY || realqname || $QRY' || t.iid)) 
          order by added, delayed_until
          limit 1
            for update
