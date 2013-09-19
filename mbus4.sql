@@ -1264,36 +1264,44 @@ CREATE OR REPLACE FUNCTION mbus4.dyn_consume(qname text, selector text default '
   RETURNS SETOF mbus4.qt_model AS
 $BODY$
 declare
- rv mbus4.qt_model;
+ iids text[];
  consid integer;
  consadded timestamp;
  hash text:='_'||md5(coalesce(selector,''));
  realqname text:= case when qname='dmq' then 'mbus4.dmq' else 'mbus4.qt$' || qname end;
+ v text;
+ rv mbus4.qt_model;
+ cnt integer;
 begin
-set local enable_seqscan=off;
 if selector is null then
    selector:='(1=1)';
 end if;
 select id, added into consid, consadded from mbus4.consumer c where c.qname=dyn_consume.qname and c.name=dyn_consume.cname;
+select consumers_cnt into cnt from mbus4.queue q where q.qname=dyn_consume.qname;
   begin
-   execute 'execute /**/ mbus4_dyn_consume_'||qname||hash||'('||consid||','''||consadded||''')' into rv;
+   execute 'execute /**/ mbus4_dyn_consume_'||qname||hash||'('||consid||','''||consadded||''')' into iids;
   exception
     when sqlstate '26000' then
       execute
       $QRY$prepare mbus4_dyn_consume_$QRY$ || qname||hash || $QRY$(integer, timestamp) as
-        select *
+        select array_agg(iid)
           from $QRY$ || realqname ||$QRY$ t
          where $1<>all(received) and t.delayed_until<now() and (1=1)=true and added > $2 and coalesce(expires,'2070-01-01'::timestamp) > now()::timestamp
-           and ($QRY$ || selector ||$QRY$)
-           and --pg_try_advisory_xact_lock( ('X' || md5('mbus4.qt$$QRY$ || qname ||$QRY$.' || t.iid))::bit(64)::bigint )
-               pg_try_advisory_xact_lock( hashtext('$QRY || realqname || $QRY' || t.iid)) 
-         order by added, delayed_until
-         limit 1
-           for update
-        $QRY$;
-   execute 'execute /**/ mbus4_dyn_consume_'||qname||hash||'('||consid||','''||consadded||''')' into rv;
+           and ($QRY$ || selector ||$QRY$)               
+         limit $QRY$ || cnt::text;
+   execute 'execute /**/ mbus4_dyn_consume_'||qname||hash||'('||consid||','''||consadded||''')' into iids;
   end;
 
+if iids is null then
+  return;
+end if;
+
+foreach v in array iids loop
+raise notice 'here';
+  rv:=mbus4.peek(v);
+  exit when pg_try_advisory_xact_lock( hashtext(realqname || rv.iid));
+  rv:=null;
+end loop;
 
 if rv.iid is not null then
     if (select array_agg(id) from mbus4.consumer c where c.qname=dyn_consume.qname and c.added<=rv.added) <@ (rv.received || consid::integer)::integer[] then
@@ -1322,8 +1330,6 @@ $BODY$
   LANGUAGE plpgsql VOLATILE
   COST 100
   ROWS 1;
-ALTER FUNCTION mbus4.dyn_consume(text, text, text)
-  OWNER TO postgres;
 
 --
 -- Name: consumer; Type: TABLE; Schema: mbus4; Owner: postgres; Tablespace:
