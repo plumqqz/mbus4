@@ -58,6 +58,14 @@ CREATE TABLE qt_model (
 
 ALTER TABLE mbus4.qt_model OWNER TO postgres;
 
+CREATE OR REPLACE FUNCTION generate_new_msgiid(qname text)
+  RETURNS text AS
+  $code$
+   select qname || '.' || nextval('mbus4.seq');
+  $code$
+  language sql;
+
+
 -- Function: string_format(text, hstore)
 
 -- DROP FUNCTION string_format(text, hstore);
@@ -428,10 +436,10 @@ insert into mbus4.qt$<!qname!>(data,
                                 received
                                )values(
                                 $1,
-                                coalesce($2,''::hstore)||
                                 hstore('enqueue_time',now()::timestamp::text) ||
                                 hstore('source_db', current_database())       ||
                                 hstore('destination_queue', $Q$<!qname!>$Q$)       ||
+                                coalesce($2,''::hstore)||
                                 case when $2 is not null and exist($2,'consume_after')  then hstore('consume_after', ($2->'consume_after')::text[]::text) else ''::hstore end ||
                                 case when $2 is null or not exist($2,'seenby') then hstore('seenby','{' || current_database() || '}') else hstore('seenby', (($2->'seenby')::text[] || current_database()::text)::text) end,
                                 $3,
@@ -880,7 +888,8 @@ Payload'ом очереди €вл€етс€ значение hstore (так что тип hstore должен быть уста
                             headers hstore DEFAULT NULL::hstore,
                             properties hstore DEFAULT NULL::hstore,
                             delayed_until timestamp without time zone DEFAULT NULL::timestamp without time zone,
-                            expires timestamp without time zone DEFAULT NULL::timestamp without time zone)
+                            expires timestamp without time zone DEFAULT NULL::timestamp without time zone,
+                            msgiid text)
    где
    data - собственно payload
    headers - заголовки сообщени€ - дл€ управлени€ поведением сообщени€
@@ -897,6 +906,7 @@ Payload'ом очереди €вл€етс€ значение hstore (так что тип hstore должен быть уста
              ѕолезно, чтобы не забивать очереди вс€кой фигней типа "получить урл", а сеть полегла,
              сообщение было проигнорировано и так и осталось болтатьс€ в очереди.
              ќт таких сообщений очередь чиститс€ функцией mbus4.clear_queue_<qname>()
+   msgiid -  iid помещаемого сообщени€. ƒолжно быть уникально, сгенерировать его можно с помощью функции generate_new_msgiid(qname)
    ¬озвращаемое значение: iid добавленного сообщени€.
 
    и еще:
@@ -955,6 +965,10 @@ Payload'ом очереди €вл€етс€ значение hstore (так что тип hstore должен быть уста
       1. очередь просто пуста
       2. все выбираемые ветви очереди уже зан€ты подписчиками, получающими сообщени€. «ан€ты они могут быть
       как тем же подписчиком, так и другими.
+
+     take(msgiid) returns qt_model
+     ѕолучает указанное сообщение и просто удал€ет его из очереди (т.е. оно не будет доступно вообще никому,
+     будет просто удалено из таблицы очереди). !!!¬ызов может быть блокирующим!!!
 
      ¬смпомогательные функции:
      mbus4.peek_<qname>(msgid text default null) - провер€ет, если ли в очереди qname сообщение с iid=msgid
@@ -1071,12 +1085,14 @@ oldqname text:='';
 visibilty_qry text:='';
 msg_exists_qry text:='';
 peek_qry text:='';
+take_qry text:='';
 begin
 set local check_function_bodies=false;
 for r in select * from mbus4.queue loop
    post_qry       := post_qry || $$ when '$$ || lower(r.qname) || $$' then return mbus4.post_$$ || r.qname || '(data, headers, properties, delayed_until, expires, iid);'||chr(10);
    msg_exists_qry := msg_exists_qry || 'when $1 like $LIKE$' || lower(r.qname) || '.%$LIKE$ then exists(select * from mbus4.qt$' || r.qname || ' q where q.iid=$1 and not mbus4.build_' || r.qname ||'_record_consumer_list(row(q.*)::mbus4.qt_model) <@ q.received)'||chr(10);
    peek_qry:= peek_qry || 'when $1 like $LIKE$' || lower(r.qname) || '.%$LIKE$ then (select row(q.*)::mbus4.qt_model from mbus4.qt$' || r.qname || ' q where q.iid=$1 )'||chr(10);
+   take_qry:= take_qry || '        when msgiid like $LIKE$' || lower(r.qname) || '.%$LIKE$ then delete from mbus4.qt$' || r.qname || ' q where q.iid=$1 returning (q.*) into rv;'||chr(10);
 end loop;
 
 if post_qry='' then
@@ -1130,6 +1146,25 @@ else
                     end, (select row(q.*)::mbus4.qt_model from mbus4.dmq q where q.iid=$1));
                 $code$
                 language sql
+        $FUNC$;
+        execute $FUNC$
+                create or replace function mbus4.take(msgiid text) returns mbus4.qt_model as
+                $code$
+                declare
+                  rv mbus4.qt_model;
+                begin
+                 perform pg_advisory_xact_lock( hashtext('mbus4.qt$' || substring($1 from '^[^.]+') || msgiid));
+                    case $FUNC$
+                     || take_qry ||
+                    $FUNC$
+                    end case;
+                    if rv is null then
+                     delete from mbus4.dmq q where iid=msgiid returning (q.*) into rv;
+                    end if;
+                    return rv;
+                end;
+                $code$
+                language plpgsql
         $FUNC$;
 end if;
 for r2 in select * from mbus4.consumer order by qname loop
