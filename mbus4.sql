@@ -1078,12 +1078,12 @@ Payload'ом очереди является значение hstore (так что тип hstore должен быть уста
     Как это должно быть выполнено :
 
     Создаются ДВЕ последовательности действий, две упорядоченных  группы сообщений : первая ("прямая") - резервирование 
-    и вторая("обратная") - откат резервирования, причем вторая  упорядочена относительно сообщения в специальной очереди ("затычки"), 
-    из которой выборка производится только путем вызова функции take. Это служебное сообщение, от которого зависят 
-    компенсационные сообщения; кроме того, в нем находятся iid всех  сообщений прямой последовательности; в случае 
-    инициирования отката это сообщение забирается функцией take и функцией же take забираются все сообщения прямой 
-    последовательности, полученные из этого служебного сообщения. Все сообщения прямой последовательности содержат 
-    ссылку на головное сообщение ("затычку") последовательности отката.
+    и вторая, с компенсационными сообщениями("обратная") - откат резервирования, причем вторая  упорядочена относительно 
+    сообщения в специальной очереди ("затычки"), из которой выборка производится только путем вызова функции take. 
+    Это служебное сообщение, от которого зависят  компенсационные сообщения; кроме того, в нем находятся iid всех 
+    сообщений прямой последовательности; в случае инициирования отката это сообщение забирается функцией take и 
+    функцией же take забираются все сообщения прямой последовательности, полученные из этого служебного сообщения. 
+    Все сообщения прямой последовательности содержат ссылку на головное сообщение ("затычку") последовательности отката.
     Последнее сообщение прямой последовательности - также служебное, в нем находятся сообщения последовательности отката и 
     при окончании прямой последовательности они также забираются функцией take. Последнее сообщение обратной 
     последовательности, как и прямой, служебное - для фиксации успешности проведения отката.
@@ -1099,19 +1099,22 @@ Payload'ом очереди является значение hstore (так что тип hstore должен быть уста
  могут выполняться / 4      2                   Трансфер до отеля       1b                 | 4b     1b                  отмена резервирования билета обратно          + могут выполняться параллельно
  параллельно       \ 5      3                   Трансфер от отеля       1b                 | 5b     1b                  отмена резервирования трансфера до отеля      |
                      6      4,5                 забрать сообщения с     1b                 | 6b     1b                  отмена резервирования транфера от отеля      /
-                                                #1b,2b,3b,4b,5b,6b                         | 7b     2b,3b,4b,5b,6b      откат завершен
+                                                #1b,2b,3b,4b,5b,6b,7b                      | 7b     2b,3b,4b,5b,6b      откат завершен
 
      Всякий консумер прямой очереди в случае обнаружения необходимости отката выбирает сообщение путем вызова функции take, откуда получает полный список
      сообщений прямой последотвальности, которые также забирает командой take, после чего фиксирует транзакцию и завершается.
      Для передачи данных нам потребуется иметь таблицу "проведение тура" (тем более что все равно надо иметь возможность просмотреть формируемые
      туры, залипшие туры, отчетность по сформированным и т.п.)
+     Каждый тип сообщения - как прямого, так и сообщения отката - фактически требует своего отдельного консумера, что логично - 
+     консумер, который резервирует номера, другой консумер, который разбирается с авиабилетами, третий - с трансфером.
 
      Псевдокод:
      -- forward transaction
      bung_iid := generate_new_msgiid('bungs'); -- нам потребуется iid сообщения-затычки
      final_iid := generate_new_msgiid('final'); -- и финального сообщения в прямой последовательности
 
-     insert into tour.... returning tour_id into tour_id; --в tours у нас будут жить промежуточные данные - номера рейсов, мест, номеров в отеле и и.п.
+     insert into tour.... returning tour_id into tour_id; --в tour у нас будут жить промежуточные данные - номера рейсов, мест, номеров в отеле и и.п.
+                                                          --а также id сообщений, которые обрабатывают данный заказ на тур
      room_resvr := post('rooms_reservations', ....);
      book_tiket_to := post('book_tikets', consume_after := array[room_resvr], tour_id := tour_id, bung :=bung_iid ...);
      book_tiket_from := post('book_tikets', consume_after := array[room_resvr],tour_id := tour_id, bung :=bung_iid ...);
@@ -1120,11 +1123,11 @@ Payload'ом очереди является значение hstore (так что тип hstore должен быть уста
 
      -- compensation transactions
      post('bungs', id_to_take := array[ room_revrv, book_tiket_to, book_tiket_from, transf_to, transf_from, final_iid], iid:=bung_iid);
-     cancel_room_resvr:= post('canel_room_reservations', consume_after:=bung_iid, tour_id := tour_id...);
-     cancel_tiket_booking_to:=post('canel_tiket_booking_to', consume_after:=bung_iid, tour_id := tour_id...);
-     canel_tiket_booking_from:=post('canel_tiket_booking_from', consume_after:=bung_iid, tour_id := tour_id...);
-     canel_transfer_to:=post('canel_transfer_to', consume_after:=bung_iid, tour_id := tour_id...);
-     canel_transfer_from:=post('canel_transfer_from', consume_after:=bung_iid, tour_id := tour_id...);
+     cancel_room_resvr:= post('cancel_room_reservations', consume_after:=bung_iid, tour_id := tour_id...);
+     cancel_tiket_booking_to:=post('cancel_tiket_booking_to', consume_after:=bung_iid, tour_id := tour_id...);
+     cancel_tiket_booking_from:=post('cancel_tiket_booking_from', consume_after:=bung_iid, tour_id := tour_id...);
+     cancel_transfer_to:=post('cancel_transfer_to', consume_after:=bung_iid, tour_id := tour_id...);
+     cancel_transfer_from:=post('cancel_transfer_from', consume_after:=bung_iid, tour_id := tour_id...);
      post('cancel_completed', consume_after:=array[cancel_room_resvr,cancel_tiket_booking_to,canel_tiket_booking_from,canel_transfer_to,canel_transfer_from]);
 
      update tour set room_resvr_iid=room_resvr,
@@ -1134,7 +1137,7 @@ Payload'ом очереди является значение hstore (так что тип hstore должен быть уста
             where tour_id=tour_id; --чтобы можно было видеть в процессе выполнения статус обработки/отката резервирования тура
 
      --закрываем прямой ход
-     post('end_of_tour_reservation', iid:=final_iid, id_to_take:=array[cancel_room_reservation,cancel_tiket_booking_to,canel_tiket_booking_from,canel_transfer_to,canel_transfer_from]);
+     post('end_of_tour_reservation', iid:=final_iid, id_to_take:=array[cancel_room_reservation,cancel_tiket_booking_to,canel_tiket_booking_from,canel_transfer_to,canel_transfer_from, bung_iid]);
 
      --наконец
      commit;
